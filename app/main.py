@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.api.v1 import risk
+from app.api.v1 import risk, reports
 
 app = FastAPI(
     title="MyESI Risk Service",
@@ -9,6 +9,7 @@ app = FastAPI(
 
 # Include router
 app.include_router(risk.router)
+app.include_router(reports.router)
 
 
 # Root test

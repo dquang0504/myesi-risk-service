@@ -18,35 +18,58 @@ SEVERITY_MAP = {
 async def compute_risk_score(
     vulns: List[Vulnerability], criticality: float = 1.0
 ) -> float:
-    """Calculate average risk score CVSS x criticalibity"""
+    """
+    Calculate weighted risk score = CVSS × exploitability × business criticality
+    Exploitability derived from Attack Vector (AV) in CVSS vector.
+    """
     if not vulns:
         return 0.0
     total = 0.0
     count = 0
 
     for v in vulns:
-        score = 0.0
-        # --- MAL prefix => always 10 ---
-        if v.vuln_id and str(v.vuln_id).startswith("MAL-"):
-            score = 10.0
+        cvss_score = 0.0
+        exploitability = 1.0  # neutral weight
 
-        # --- CVSS vector parse ---
+        # --- Special case for MAL- prefixed threats ---
+        if v.vuln_id and str(v.vuln_id).startswith("MAL-"):
+            cvss_score = 10.0
+            exploitability = 1.2  # slightly boost malicious markers
+
+        # --- Parse CVSS vector if present ---
         elif v.cvss_vector:
             try:
+
                 cvss_obj = CVSS3(v.cvss_vector)
-                score = cvss_obj.scores()[0]  # base score
+                base_score = cvss_obj.scores()[0]  # base score
+
+                # Extract Attack Vector (AV) = N / A / L / P
+                vector = v.cvss_vector.upper()
+                if "AV:N" in vector:
+                    exploitability = 1.20  # Network
+                elif "AV:A" in vector:
+                    exploitability = 1.10  # Adjacent
+                elif "AV:L" in vector:
+                    exploitability = 0.90  # Local
+                elif "AV:P" in vector:
+                    exploitability = 0.80  # Physical
+
+                cvss_score = base_score
+
             except Exception:
-                pass  # fallback continues
+                pass  # fallback severity will handle
 
-        # --- Fallback according to severity ---
-        if score == 0.0 and v.severity:
-            sev_str = str(v.severity).lower()
-            score = SEVERITY_MAP.get(sev_str, 0.0)
+        # --- Fallback if no CVSS vector ---
+        if cvss_score == 0.0 and v.severity:
+            sev = str(v.severity).lower()
+            cvss_score = SEVERITY_MAP.get(sev, 0.0)
 
-        if score > 0.0:
-            total += score
+        if cvss_score > 0.0:
+            weighted = cvss_score * exploitability * criticality
+            total += weighted
             count += 1
-    return round((total / count) * criticality, 2) if count > 0 else 0.0
+
+    return round(total / count, 2) if count > 0 else 0.0
 
 
 async def save_risk_scores(vulns: List[Vulnerability], sbom_id: str, db: AsyncSession):
