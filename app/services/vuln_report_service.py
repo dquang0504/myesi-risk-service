@@ -3,7 +3,7 @@ import json
 import io
 import base64
 from datetime import datetime
-from typing import  Dict
+from typing import Dict
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
