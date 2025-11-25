@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from fastapi import Depends
@@ -5,6 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from dateutil import parser as date_parser
 from app.db import session as db_session
+from app.services.remediation_helper import generate_remediation
 
 
 # ===== Helper: compute update freshness =====
@@ -152,29 +154,43 @@ async def extract_detailed_controls(
     by_control = detailed_scores_dict.get("by_control") or detailed_scores_dict.get(
         "by_severity"
     )
-    if by_control:
-        for ctrl, score in by_control.items():
-            # fetch title and category from DB
-            q = await db.execute(
-                text(
-                    """
-                    SELECT title, category FROM compliance_weights 
-                    WHERE standard IN ('ISO_27001:2022','NIST_SP_800_53','OWASP') 
-                    AND scope_key = :ctrl LIMIT 1
-                """
-                ),
-                {"ctrl": ctrl},
-            )
-            row = q.fetchone()
-            title, category = ("", "")
-            if row:
-                title, category = row
-            controls.append(
-                {
-                    "control_id": ctrl,
-                    "control_title": title,
-                    "category": category,
-                    "score": score,
-                }
-            )
+
+    if not by_control:
+        return controls
+
+    # === Step 1: fetch metadata for all controls ===
+    meta_map = {}
+    q = await db.execute(
+        text(
+            """
+            SELECT scope_key, title, category 
+            FROM compliance_weights 
+            WHERE standard IN ('ISO_27001:2022','NIST_SP_800_53','OWASP')
+        """
+        )
+    )
+    rows = q.fetchall()
+    for r in rows:
+        meta_map[r[0]] = {"title": r[1], "category": r[2]}
+
+    # === Step 2: build list ===
+    for ctrl, score in by_control.items():
+        meta = meta_map.get(ctrl, {"title": "", "category": "General"})
+        controls.append(
+            {
+                "control_id": ctrl,
+                "control_title": meta["title"],
+                "category": meta["category"],
+                "score": score,
+            }
+        )
+
+    # === Step 3: concurrently fetch AI remediation ===
+    tasks = [generate_remediation(c) for c in controls]
+    ai_outputs = await asyncio.gather(*tasks)
+
+    for i, rem in enumerate(ai_outputs):
+        controls[i]["remediation"] = rem["remediation"]
+        controls[i]["remediation_source"] = rem["source"]
+
     return controls
