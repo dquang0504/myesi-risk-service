@@ -16,3 +16,18 @@ class ComponentSchema(BaseModel):
 class RiskScoreSchema(BaseModel):
     component_name: str
     score: float
+
+
+# ----------------------------
+# Risk model schemas
+# ----------------------------
+class RiskScoreResponse(BaseModel):
+    component_name: str
+    component_version: str
+    score: float
+
+
+class RiskTrendResponse(BaseModel):
+    component_name: str
+    average_score: float
+    sbom_count: int
