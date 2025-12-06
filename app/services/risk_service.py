@@ -243,18 +243,32 @@ async def get_risk_trends(db: AsyncSession) -> List[Dict]:
 
 
 G4F_API_URL = os.getenv("G4F_API_URL", "http://g4f-service:8080/v1/chat/completions")
+G4F_API_KEY = os.getenv("G4F_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 async def call_g4f_remediation(prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            G4F_API_URL,
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        # Giả sử structure giống OpenAI: {"choices":[{"message":{"content": "..."} }]}
-        return data["choices"][0]["message"]["content"]
+    headers = {"Content-Type": "application/json"}
+    if G4F_API_KEY:
+        headers["g4f-api-key"] = G4F_API_KEY
+    if OPENROUTER_API_KEY:
+        headers["openrouter-api-key"] = OPENROUTER_API_KEY
+        headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+    payload = {
+        "model": "openai/gpt-4o-mini",
+        "provider": "OpenRouter",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.6,
+    }
+    if OPENROUTER_API_KEY:
+        payload["api_key"] = OPENROUTER_API_KEY
+    elif G4F_API_KEY:
+        payload["api_key"] = G4F_API_KEY
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(G4F_API_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise RuntimeError(f"g4f remediation failed: {e}")

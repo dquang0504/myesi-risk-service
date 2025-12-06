@@ -1,10 +1,25 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+ENV PYTHONPATH=/app
+
+# Install native deps for WeasyPrint (cairo, pango, gdk-pixbuf) + fonts
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libpango-1.0-0 \
+      libpangocairo-1.0-0 \
+      libcairo2 \
+      libgdk-pixbuf-2.0-0 \
+      libffi-dev \
+      libssl-dev \
+      libjpeg62-turbo \
+      zlib1g \
+      fonts-dejavu-core && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY ./app ./app
 
