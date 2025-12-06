@@ -48,6 +48,13 @@ async def handle_risk_event(sbom_id: str, project: str):
 
         risk_scores = await save_risk_scores(vulns, sbom_id, db)
 
+        project_row = await db.execute(
+            text("SELECT id FROM projects WHERE name = :project LIMIT 1"),
+            {"project": project},
+        )
+        project_id_row = project_row.fetchone()
+        project_id = project_id_row[0] if project_id_row else None
+
         # Build payload full info
         payload = {
             "type": "scan_complete",
@@ -86,6 +93,66 @@ async def handle_risk_event(sbom_id: str, project: str):
             "highest_severity": compute_highest_severity([v.severity for v in vulns]),
             "last_scan": datetime.utcnow().isoformat(),
         }
+
+        code_findings = []
+        if project_id:
+            cf_rows = await db.execute(
+                text(
+                    """
+                    SELECT id,
+                           COALESCE(project_name, '') AS project_name,
+                           COALESCE(rule_id, '')      AS rule_id,
+                           COALESCE(rule_title, '')   AS rule_title,
+                           COALESCE(severity, '')     AS severity,
+                           COALESCE(file_path, '')    AS file_path,
+                           COALESCE(start_line, 0)    AS start_line,
+                           COALESCE(end_line, 0)      AS end_line,
+                           COALESCE(category, '')     AS category,
+                           COALESCE(confidence, '')   AS confidence,
+                           COALESCE(message, '')      AS message
+                    FROM code_findings
+                    WHERE project_id = :project_id
+                    ORDER BY created_at DESC
+                    LIMIT 500
+                    """
+                ),
+                {"project_id": project_id},
+            )
+            for row in cf_rows.fetchall():
+                code_findings.append(
+                    {
+                        "id": row[0],
+                        "project_name": row[1],
+                        "rule_id": row[2],
+                        "rule_title": row[3],
+                        "severity": row[4],
+                        "file_path": row[5],
+                        "start_line": row[6],
+                        "end_line": row[7],
+                        "category": row[8],
+                        "confidence": row[9],
+                        "message": row[10],
+                    }
+                )
+
+        payload["code_findings"] = code_findings
+        payload["code_findings_count"] = len(code_findings)
+        payload["projects"] = [
+            {
+                "project_name": project,
+                "total_vulns": len(vulns),
+                "avg_risk_score": (
+                    round(sum(r["score"] for r in risk_scores) / len(risk_scores), 2)
+                    if risk_scores
+                    else 0
+                ),
+                "highest_severity": compute_highest_severity(
+                    [v.severity for v in vulns]
+                ),
+                "last_scan": datetime.utcnow().isoformat(),
+                "code_findings": len(code_findings),
+            }
+        ]
 
         await broadcast_to_clients(project, payload)
 

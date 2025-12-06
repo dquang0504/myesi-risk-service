@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends
+import os
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db import session as db_session
 from app.services.report_generator import (
@@ -23,11 +24,19 @@ async def get_compliance_report(
     Receive payload from frontend (project_id, project_name, user_id),
     create report compliance and return PDF file.
     """
-    report_path, report_record = await generate_compliance_report(
-        db=db,
-        project_name=payload.project_name,
-        user_id=payload.user_id,
-    )
+    try:
+        report_path, report_record = await generate_compliance_report(
+            db=db,
+            project_name=payload.project_name,
+            user_id=payload.user_id,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
+
+    if not report_path or not os.path.exists(report_path):
+        raise HTTPException(
+            status_code=500, detail="Failed to generate compliance report file"
+        )
 
     return FileResponse(
         path=report_path,

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 from app.db.models import ComplianceReport
 from app.db import session as db_session
-from app.utils.report_helper import weighted_compliance
+from app.utils.report_helper import weighted_compliance, compute_dev_hygiene
 from app.services.remediation_helper import generate_remediation
 from app.templates.burp_style_report import generate_burp_style_report
 
@@ -82,33 +82,14 @@ async def generate_compliance_report(
     Generate compliance report PDF for a project.
     Handles SBOM limit reached and missing SBOM.
     """
-
-    # ===== Step 0: Check quota using check_and_consume_usage =====
-    usage_res = await db.execute(
-        text(
-            """
-            SELECT allowed, message, next_reset
-            FROM check_and_consume_usage(
-                (SELECT organization_id FROM projects WHERE name = :project),
-                'project_scan',
-                0
-            )
-        """
-        ),
-        {"project": project_name},
-    )
-    usage_row = usage_res.fetchone()
+    # ===== Step 0: No quota consumption for report generation =====
     quota_allowed = True
     note = ""
-    if usage_row:
-        allowed, message, next_reset = usage_row
-        if not allowed:
-            quota_allowed = False
-            note = f"Compliance score unavailable: {message}"
 
     # ===== Step 1: Get latest SBOM only if quota allowed =====
     sbom_id = None
     sbom_updated_at = None
+    project_id = None
     vuln_records = []
     vuln_stats = {}
     avg_risk = 0
@@ -117,18 +98,24 @@ async def generate_compliance_report(
     if quota_allowed:
         sbom_result = await db.execute(
             text(
-                "SELECT id, updated_at FROM sboms WHERE project_name = :project ORDER BY created_at DESC LIMIT 1"
+                "SELECT id, updated_at, project_id FROM sboms WHERE project_name = :project ORDER BY created_at DESC LIMIT 1"
             ),
             {"project": project_name},
         )
         sbom = sbom_result.fetchone()
         if sbom:
-            sbom_id, sbom_updated_at = sbom
+            sbom_id, sbom_updated_at, project_id = sbom
 
     # ===== Step 2: Get vulnerabilities only if SBOM exists =====
     if sbom_id:
         vulns_result = await db.execute(
-            text("SELECT * FROM vulnerabilities WHERE sbom_id = :sbom_id"),
+            text(
+                """
+                SELECT * 
+                FROM vulnerabilities 
+                WHERE sbom_id = :sbom_id AND is_active = TRUE
+                """
+            ),
             {"sbom_id": sbom_id},
         )
         vuln_rows = vulns_result.mappings().all()
@@ -136,7 +123,12 @@ async def generate_compliance_report(
 
         result = await db.execute(
             text(
-                "SELECT COALESCE(severity, 'unknown'), COUNT(*) as count FROM vulnerabilities WHERE sbom_id = :sbom_id GROUP BY severity"
+                """
+                SELECT COALESCE(severity, 'unknown'), COUNT(*) as count 
+                FROM vulnerabilities 
+                WHERE sbom_id = :sbom_id AND is_active = TRUE
+                GROUP BY severity
+                """
             ),
             {"sbom_id": sbom_id},
         )
@@ -151,33 +143,60 @@ async def generate_compliance_report(
         )
         avg_risk = float(result.scalar() or 0)
 
-    # ===== Step 3: If no SBOM or no vulnerabilities, fallback to code findings =====
-    if not sbom_id or not vuln_records:
-        code_findings_res = await db.execute(
-            text("SELECT * FROM code_findings WHERE project_name = :project"),
-            {"project": project_name},
-        )
-        code_findings = code_findings_res.mappings().all()
+    # ===== Step 3: If missing SBOM or no vulnerabilities, try code findings; otherwise continue =====
+    code_findings = []
+    # luôn lấy code findings để tính compliance bổ sung
+    code_findings_res = await db.execute(
+        text("SELECT * FROM code_findings WHERE project_name = :project"),
+        {"project": project_name},
+    )
+    code_findings = code_findings_res.mappings().all()
 
-        if not code_findings:
-            # Nothing to report
-            return None, None
+    if not sbom_id and not code_findings:
+        # Nothing to report
+        raise ValueError(
+            f"No SBOM or code findings available for project '{project_name}', cannot generate compliance report."
+        )
 
     # ===== Step 4: Calculate compliance score only if SBOM exists =====
-    if sbom_id and vuln_records:
-        compliance_score, detailed_scores = await weighted_compliance(
-            sbom_id=sbom_id,
-            vuln_stats=vuln_stats,
-            avg_risk=avg_risk,
-            vuln_records=vuln_records,
-            sbom_updated_at=sbom_updated_at,
-            standard=standard,
-            weight_override_id=weight_override_id,
-            db=db,
-        )
+    compliance_score = 0.0
+    detailed_scores = {}
+    per_standard_scores = {}
+
+    if sbom_id:
+        standards = ["ISO_27001:2022", "NIST_SP_800_53", "OWASP"]
+        for std in standards:
+            if vuln_records:
+                score, d = await weighted_compliance(
+                    sbom_id=sbom_id,
+                    vuln_stats=vuln_stats,
+                    avg_risk=avg_risk,
+                    vuln_records=vuln_records,
+                    sbom_updated_at=sbom_updated_at,
+                    standard=std,
+                    weight_override_id=weight_override_id,
+                    code_findings=code_findings,
+                    project_id=project_id,
+                    db=db,
+                )
+            else:
+                score, d = 100.0, {
+                    "by_severity": {},
+                    "average_risk": avg_risk,
+                    "update_score": 100.0,
+                    "developer_hygiene_score": 100.0,
+                }
+            per_standard_scores[std] = score
+            if std == standard:
+                compliance_score = score
+                detailed_scores = d
     else:
         compliance_score = 0
-        detailed_scores = {}
+        detailed_scores = {
+            "developer_hygiene_score": compute_dev_hygiene(
+                [], code_findings or [], sbom_updated_at=None
+            )
+        }
 
     # ===== Step 5: Standards mapping =====
     def standard_level(standard, score, vuln_stats):
@@ -208,11 +227,19 @@ async def generate_compliance_report(
         return "Unknown"
 
     standards = {
-        "ISO_27001": standard_level("ISO_27001", compliance_score, vuln_stats),
-        "NIST_SP_800_53": standard_level(
-            "NIST_SP_800_53", compliance_score, vuln_stats
+        "ISO_27001": standard_level(
+            "ISO_27001",
+            per_standard_scores.get("ISO_27001:2022", compliance_score),
+            vuln_stats,
         ),
-        "OWASP": standard_level("OWASP", compliance_score, vuln_stats),
+        "NIST_SP_800_53": standard_level(
+            "NIST_SP_800_53",
+            per_standard_scores.get("NIST_SP_800_53", compliance_score),
+            vuln_stats,
+        ),
+        "OWASP": standard_level(
+            "OWASP", per_standard_scores.get("OWASP", compliance_score), vuln_stats
+        ),
     }
 
     # ===== Step 6: Build summary =====
@@ -221,6 +248,7 @@ async def generate_compliance_report(
         "vulnerabilities": vuln_stats,
         "average_risk": avg_risk,
         "compliance_score": compliance_score,
+        "per_standard_scores": per_standard_scores,
         "detailed_scores": detailed_scores,
         "note": note,  # <-- Add note about quota if any
     }
