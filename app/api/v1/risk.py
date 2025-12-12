@@ -13,6 +13,7 @@ from app.schemas.risk import RiskScoreResponse, RiskTrendResponse
 from collections import defaultdict
 from app.db import session as db_session
 from app.services.risk_service import (
+    get_org_id_from_header,
     save_risk_scores,
     get_risk_trends,
 )
@@ -186,7 +187,10 @@ async def send_broadcast(project, payload):
 
 
 @router.get("/analytics")
-async def risk_distribution(db: AsyncSession = Depends(db_session.get_db)):
+async def risk_distribution(
+    org_id: int = Depends(get_org_id_from_header),
+    db: AsyncSession = Depends(db_session.get_db),
+):
     """
     Returns:
       - overallRisk: average risk score (0–10)
@@ -198,17 +202,19 @@ async def risk_distribution(db: AsyncSession = Depends(db_session.get_db)):
     # -------------------------------
     sev_sql = text(
         """
-        SELECT severity
-        FROM vulnerabilities
+        SELECT v.severity
+        FROM vulnerabilities v
+        JOIN projects p ON v.project_id = p.id
+        WHERE p.organization_id = :org_id
     """
     )
-    sev_result = await db.execute(sev_sql)
+    sev_result = await db.execute(sev_sql, {"org_id": org_id})
     rows = sev_result.fetchall()
 
     sev_count = {
         "critical": 0,
         "high": 0,
-        "moderate": 0,
+        "medium": 0,
         "low": 0,
     }
 
@@ -224,12 +230,15 @@ async def risk_distribution(db: AsyncSession = Depends(db_session.get_db)):
     # -------------------------------
     risk_sql = text(
         """
-        SELECT score
-        FROM risk_scores
-        WHERE score IS NOT NULL
+        SELECT rs.score
+        FROM risk_scores rs
+        JOIN sboms s ON rs.sbom_id = s.id
+        JOIN projects p ON s.project_id = p.id
+        WHERE rs.score IS NOT NULL
+          AND p.organization_id = :org_id
     """
     )
-    risk_result = await db.execute(risk_sql)
+    risk_result = await db.execute(risk_sql, {"org_id": org_id})
     score_rows = [r[0] for r in risk_result.fetchall() if r[0] is not None]
 
     if len(score_rows) == 0:
@@ -244,7 +253,7 @@ async def risk_distribution(db: AsyncSession = Depends(db_session.get_db)):
         "distribution": [
             {"name": "Critical", "value": sev_count["critical"]},
             {"name": "High", "value": sev_count["high"]},
-            {"name": "Moderate", "value": sev_count["moderate"]},
+            {"name": "medium", "value": sev_count["medium"]},
             {"name": "Low", "value": sev_count["low"]},
         ],
     }
@@ -252,7 +261,9 @@ async def risk_distribution(db: AsyncSession = Depends(db_session.get_db)):
 
 @router.get("/heatmap")
 async def risk_heatmap(
-    type: str = "projects", db: AsyncSession = Depends(db_session.get_db)
+    org_id: int = Depends(get_org_id_from_header),
+    type: str = "projects",
+    db: AsyncSession = Depends(db_session.get_db),
 ):
     if type != "projects":
         raise HTTPException(status_code=400, detail="Only 'projects' heatmap supported")
@@ -272,13 +283,15 @@ async def risk_heatmap(
             ON rs.sbom_id = v.sbom_id
            AND rs.component_name = v.component_name
            AND rs.component_version = v.component_version
-        WHERE v.created_at >= CURRENT_DATE - INTERVAL '7 days' AND v.is_active = TRUE
+        WHERE v.created_at >= CURRENT_DATE - INTERVAL '7 days'
+          AND v.is_active = TRUE
+          AND p.organization_id = :org_id
         GROUP BY p.name, DATE(v.created_at)
         ORDER BY p.name, day;
     """
     )
 
-    result = await db.execute(sql)
+    result = await db.execute(sql, {"org_id": org_id})
     rows = result.fetchall()
 
     data = []
@@ -404,7 +417,6 @@ async def analyst_dashboard(db: AsyncSession = Depends(db_session.get_db)):
         severity_weights = {
             "critical": 0.25,
             "high": 0.25,
-            "moderate": 0.15,
             "medium": 0.15,
             "low": 0.10,
             "unknown": 0.05,
@@ -482,7 +494,6 @@ async def analyst_dashboard(db: AsyncSession = Depends(db_session.get_db)):
         severity_weights = {
             "critical": 0.25,
             "high": 0.25,
-            "moderate": 0.15,
             "medium": 0.15,
             "low": 0.10,
             "unknown": 0.05,
@@ -524,18 +535,18 @@ async def analyst_dashboard(db: AsyncSession = Depends(db_session.get_db)):
       """
         )
     )
-    sev_counts = defaultdict(int, {"critical": 0, "high": 0, "moderate": 0, "low": 0})
+    sev_counts = defaultdict(int, {"critical": 0, "high": 0, "medium": 0, "low": 0})
     for sev, cnt in dist_rows:
         if sev:
             key = str(sev).lower()
             if key == "medium":
-                key = "moderate"
+                key = "medium"
             sev_counts[key] += cnt
 
     distribution = [
         {"name": "Critical", "value": sev_counts["critical"]},
         {"name": "High", "value": sev_counts["high"]},
-        {"name": "Moderate", "value": sev_counts["moderate"]},
+        {"name": "medium", "value": sev_counts["medium"]},
         {"name": "Low", "value": sev_counts["low"]},
     ]
 
@@ -675,7 +686,7 @@ async def risk_overview(db: AsyncSession = Depends(db_session.get_db)):
         )
     )
     dist = [
-        {"name": ("Moderate" if sev == "medium" else sev.title()), "value": cnt}
+        {"name": ("medium" if sev == "medium" else sev.title()), "value": cnt}
         for sev, cnt in dist_rows.fetchall()
     ]
 
@@ -697,7 +708,7 @@ async def risk_overview(db: AsyncSession = Depends(db_session.get_db)):
         entry = trend_map.setdefault(
             key, {"date": key, "critical": 0, "high": 0, "medium": 0, "low": 0}
         )
-        sev_key = "medium" if sev == "moderate" else sev
+        sev_key = "medium" if sev == "medium" else sev
         if sev_key in entry:
             entry[sev_key] += cnt
     trend = list(trend_map.values())
