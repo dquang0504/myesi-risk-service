@@ -1,5 +1,6 @@
 # app/services/risk_service.py
 import os
+from fastapi import HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import RiskScore, Vulnerability
 from datetime import datetime
@@ -16,7 +17,6 @@ SEVERITY_MAP = {
     "none": 0.0,
     "low": 3.1,
     "medium": 6.0,
-    "moderate": 6.0,
     "high": 8.5,
     "critical": 10.0,
 }
@@ -272,3 +272,22 @@ async def call_g4f_remediation(prompt: str) -> str:
             return data["choices"][0]["message"]["content"]
     except Exception as e:
         raise RuntimeError(f"g4f remediation failed: {e}")
+
+
+def get_org_id_from_header(request: Request) -> int:
+    """
+    Extract organization_id from X-Organization-ID header, injected by API Gateway.
+    """
+    org_header = request.headers.get("X-Organization-ID")
+    if not org_header:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing X-Organization-ID header (organization context required).",
+        )
+    try:
+        return int(org_header)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid X-Organization-ID header value.",
+        )

@@ -2,6 +2,7 @@
 import asyncio
 from fastapi import FastAPI
 from app.workers.kafka_consumer import consume_messages
+from app.workers.weekly_reports import start_weekly_report_scheduler
 from app.api.v1 import risk, reports
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,6 +25,7 @@ app.add_middleware(
 async def startup_event():
     """Start Kafka consumer on app startup."""
     asyncio.create_task(consume_messages())
+    asyncio.create_task(start_weekly_report_scheduler())
     print("[Init] Kafka async consumer started ✅")
 
 
