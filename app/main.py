@@ -2,8 +2,9 @@
 import asyncio
 from fastapi import FastAPI
 from app.workers.kafka_consumer import consume_messages
+from app.workers.project_rescan_scheduler import start_project_rescan_scheduler
 from app.workers.weekly_reports import start_weekly_report_scheduler
-from app.api.v1 import risk, reports
+from app.api.v1 import reports, risk, vuln_projects
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
@@ -26,6 +27,7 @@ async def startup_event():
     """Start Kafka consumer on app startup."""
     asyncio.create_task(consume_messages())
     asyncio.create_task(start_weekly_report_scheduler())
+    asyncio.create_task(start_project_rescan_scheduler())
     print("[Init] Kafka async consumer started ✅")
 
 
@@ -37,6 +39,7 @@ async def shutdown_event():
 # Include routers
 app.include_router(risk.router)
 app.include_router(reports.router)
+app.include_router(vuln_projects.router)
 
 
 @app.get("/")
