@@ -643,7 +643,16 @@ async def risk_overview(db: AsyncSession = Depends(db_session.get_db)):
         or 0
     )
     avg_risk_score = (
-        await db.scalar(text("SELECT COALESCE(AVG(avg_risk_score),0) FROM projects"))
+        await db.scalar(
+            text(
+                """
+            SELECT COALESCE(AVG(avg_risk_score), 0)
+            FROM projects
+            WHERE (last_vuln_scan IS NOT NULL OR last_sbom_upload IS NOT NULL)
+              AND avg_risk_score IS NOT NULL
+            """
+            )
+        )
         or 0.0
     )
 
@@ -652,22 +661,11 @@ async def risk_overview(db: AsyncSession = Depends(db_session.get_db)):
         await db.scalar(
             text(
                 """
-            SELECT COUNT(*) FROM (
-              SELECT p.id,
-                     AVG(rs.score) AS avg_risk,
-                     COUNT(v.id) AS active_vulns
-              FROM projects p
-              LEFT JOIN sboms s ON s.project_id = p.id
-              LEFT JOIN vulnerabilities v
-                ON v.sbom_id = s.id
-               AND v.is_active = TRUE
-              LEFT JOIN risk_scores rs
-                ON rs.sbom_id = v.sbom_id
-               AND rs.component_name = v.component_name
-               AND rs.component_version = v.component_version
-              GROUP BY p.id
-            ) t
-            WHERE t.active_vulns > 0 AND t.avg_risk >= 7
+            SELECT COUNT(*)
+            FROM projects
+            WHERE (COALESCE(total_vulnerabilities, 0) > 0 OR last_vuln_scan IS NOT NULL)
+              AND (last_vuln_scan IS NOT NULL OR last_sbom_upload IS NOT NULL)
+              AND COALESCE(avg_risk_score, 0) >= 7
             """
             )
         )
@@ -736,20 +734,26 @@ async def risk_overview(db: AsyncSession = Depends(db_session.get_db)):
     proj_rows = await db.execute(
         text(
             """
-            SELECT p.name,
-                   COALESCE(AVG(rs.score), 0) AS avg_risk,
-                   COUNT(v.id) AS active_vulns
+            SELECT
+                p.name,
+                CASE
+                    WHEN COUNT(rs.score) FILTER (WHERE rs.score IS NOT NULL) > 0
+                        THEN AVG(rs.score)
+                    ELSE p.avg_risk_score
+                END AS calc_score,
+                SUM(CASE WHEN v.is_active THEN 1 ELSE 0 END) AS active_vulns
             FROM projects p
             LEFT JOIN sboms s ON s.project_id = p.id
             LEFT JOIN vulnerabilities v
               ON v.sbom_id = s.id
-             AND v.is_active = TRUE
             LEFT JOIN risk_scores rs
               ON rs.sbom_id = v.sbom_id
              AND rs.component_name = v.component_name
              AND rs.component_version = v.component_version
-            GROUP BY p.name
-            ORDER BY avg_risk DESC NULLS LAST
+            WHERE (p.last_vuln_scan IS NOT NULL OR p.last_sbom_upload IS NOT NULL)
+            GROUP BY p.id
+            HAVING SUM(CASE WHEN v.is_active THEN 1 ELSE 0 END) > 0
+            ORDER BY calc_score DESC NULLS LAST
             LIMIT 10
             """
         )

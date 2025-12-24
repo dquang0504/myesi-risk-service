@@ -65,6 +65,7 @@ class Vulnerability(Base):
     cvss_vector = Column(String(255))
     sbom_component_count = Column(Integer, default=0)
     sbom_hash = Column(Text)
+    is_active = Column(Boolean, default=True)
     created_at = Column(TIMESTAMP(timezone=True), server_default="now()")
     updated_at = Column(TIMESTAMP(timezone=True), server_default="now()")
 
@@ -93,3 +94,20 @@ class ComplianceReport(Base):
     status = Column(String, default="completed")
     created_at = Column(TIMESTAMP)
     updated_at = Column(TIMESTAMP)
+
+
+class ProjectRescanSetting(Base):
+    __tablename__ = "project_rescan_settings"
+
+    project_id = Column(
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    enabled = Column(Boolean, nullable=False, default=False)
+    frequency_hours = Column(Integer, nullable=False, default=24)
+    last_enqueued_at = Column(TIMESTAMP(timezone=True))
+    next_run_at = Column(TIMESTAMP(timezone=True))
+    created_at = Column(TIMESTAMP(timezone=True), server_default="now()")
+    updated_at = Column(TIMESTAMP(timezone=True), server_default="now()")
